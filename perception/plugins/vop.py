@@ -390,6 +390,7 @@ class _VOPNode(Node):
         self._output_topic = output_topic_for(input_topic)
         self._model = model
         self._vocabulary = list(vocabulary or [])
+        self._board = None   # set by the plugin when board #294 meta is loaded
         self._confidence = confidence
         self._fps = fps
         self._publish_bbox = bool(publish_bbox)
@@ -504,9 +505,13 @@ class _VOPNode(Node):
                 if frame is None:
                     continue
                 outputs, meta = self._model.infer(frame)
-                boxes, scores, classes = decode_detections(
-                    outputs, meta, self._confidence
-                )
+                if self._board is not None:
+                    from plugins.vop294 import decode as _board_decode
+                    boxes, scores, classes = _board_decode(outputs, meta, self._board)
+                else:
+                    boxes, scores, classes = decode_detections(
+                        outputs, meta, self._confidence
+                    )
                 objects = self._extract_objects(boxes, scores, classes, frame)
                 self._publish_objects(objects, started)
             except Exception as e:
@@ -598,6 +603,8 @@ class VideoObjectPerceptionPlugin:
         self._publish_color = _color_level(plugin_cfg.get("publish_color"))
         self._model_name = canonical_model_name(plugin_cfg.get("model", DEFAULT_MODEL))
         self._vocabulary: list[str] = []      # filled from the bundle's vocab.json
+        self._vocab_path: Optional[str] = None
+        self._board = None                    # board #294 thresholds/decode (plugins/vop294.py)
         self._model = None  # lazy load
         self._model_loading = False
         self._model_load_error = None
@@ -638,6 +645,16 @@ class VideoObjectPerceptionPlugin:
         # seconds without blocking dispatch or touching the GPU.
         threading.Thread(target=self._prefetch_vocabulary, daemon=True,
                          name="vop_vocab_prefetch").start()
+        # Board #294: load the engine right away so the first evaluated image does
+        # not pay for the bundle download + engine deserialisation.
+        from plugins import vop294 as _vop294
+        if _vop294.bundle_spec() is not None and os.environ.get("VOP294_EAGER", "1") != "0":
+            def _eager():
+                try:
+                    self._ensure_model()
+                except Exception as error:  # noqa: BLE001 — retried lazily on first request
+                    log.warning(f"[vop294] eager engine load failed: {error}")
+            threading.Thread(target=_eager, daemon=True, name="vop294_eager").start()
 
     def _prefetch_vocabulary(self):
         """Populate _vocabulary from vocab.json alone, without loading the engine.
@@ -646,6 +663,9 @@ class VideoObjectPerceptionPlugin:
         engine download at start has its own error path) and simply reports an
         unknown vocabulary until then.
         """
+        from plugins import vop294 as _vop294
+        if _vop294.bundle_spec() is not None:
+            return  # board #294 bundle: vocabulary comes with the eager engine load
         try:
             from utils.model_downloader import (
                 VOP_MODEL_BUNDLES, ensure_verified_bundle, require_models_subpath,
@@ -738,6 +758,11 @@ class VideoObjectPerceptionPlugin:
             # it cannot be stale or out of order. vocab.json only covers an
             # engine built without names.
             self._vocabulary = self._model.class_names() or vocab
+            from plugins.vop294 import BoardMeta
+            self._board = BoardMeta.from_vocab(getattr(self, "_vocab_path", None))
+            if self._board is not None:
+                log.info(f"[vop294] board meta: decode={self._board.decode} "
+                         f"classes={len(self._board.classes)} min_thr={self._board.min_thr:.3f}")
             if not self._vocabulary:
                 log.warning("[vop] engine carries no class names and no vocab.json "
                             "was readable — detections will be labelled by index")
@@ -755,9 +780,17 @@ class VideoObjectPerceptionPlugin:
         """
         configured = (self._model_name or "").strip()
         if configured.endswith(".engine") and os.path.isfile(configured):
-            return configured, self._read_vocab(
-                os.path.join(os.path.dirname(configured), "vocab.json")
-            )
+            self._vocab_path = os.path.join(os.path.dirname(configured), "vocab.json")
+            return configured, self._read_vocab(self._vocab_path)
+
+        # Board #294: fine-tuned 220-class engine from the pinned mirror bundle.
+        from plugins import vop294
+        if vop294.bundle_spec() is not None:
+            from utils.model_progress import fetch_status
+            progress_cb, _ = fetch_status(
+                lambda text: setattr(self, "_model_load_status", text), "vop294")
+            engine, self._vocab_path = vop294.ensure_bundle(progress_cb=progress_cb)
+            return engine, self._read_vocab(self._vocab_path)
 
         from utils.model_downloader import ensure_vop_model
         from utils.model_progress import fetch_status
@@ -767,7 +800,8 @@ class VideoObjectPerceptionPlugin:
             lambda text: setattr(self, "_model_load_status", text), "yoloe-26s-seg")
         paths = ensure_vop_model(model_dir, progress_cb=progress_cb)
         engine = next(p for name, p in paths.items() if name.endswith(".engine"))
-        return engine, self._read_vocab(paths.get("vocab.json"))
+        self._vocab_path = paths.get("vocab.json")
+        return engine, self._read_vocab(self._vocab_path)
 
     @staticmethod
     def _read_vocab(path: Optional[str]) -> list[str]:
@@ -835,7 +869,13 @@ class VideoObjectPerceptionPlugin:
         from plugins.vision_runtime import decode_detections
 
         outputs, meta = model.infer(frame)
-        boxes, scores, classes = decode_detections(outputs, meta, confidence)
+        if self._board is not None:
+            # Board #294: per-class thresholds tuned for Macro-F1 replace the single
+            # caller threshold (logged so the official inference log shows it).
+            from plugins.vop294 import decode as _board_decode
+            boxes, scores, classes = _board_decode(outputs, meta, self._board)
+        else:
+            boxes, scores, classes = decode_detections(outputs, meta, confidence)
 
         # Same shape the stream publishes, so a consumer written against
         # {topic}/objects needs no second parser — plus the pixel box, which a
@@ -881,6 +921,14 @@ class VideoObjectPerceptionPlugin:
             # lights-on check still needs a brightness number to read.
             "frame_color": color_stats(frame),
         }
+        try:
+            top = sorted(objects, key=lambda o: -o["confidence"])[:6]
+            log.info("[vop294] diag src=%s size=%dx%d n=%d ms=%d caller_conf=%s top=%s",
+                     os.path.basename(str(source)), width, height, len(objects),
+                     result["latency_ms"], args.get("confidence"),
+                     ";".join(f"{o['name']}:{o['confidence']}" for o in top))
+        except Exception:  # noqa: BLE001 — diagnostics must never break the answer
+            pass
         return result
 
     def _publish_one_shot(self, instance_id: str, objects: list,
@@ -928,6 +976,7 @@ class VideoObjectPerceptionPlugin:
             node = _VOPNode(input_for_node, self._model, confidence, fps,
                             node_suffix=suffix, vocabulary=self._vocabulary,
                             publish_bbox=publish_bbox, publish_color=publish_color)
+            node._board = self._board
             self._executor.add_node(node)
             self._nodes[node_key] = node
         node.start()
