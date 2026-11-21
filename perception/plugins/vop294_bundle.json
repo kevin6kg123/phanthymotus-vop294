@@ -1,18 +1,18 @@
 {
- "version": "v2",
+ "version": "v3",
  "sources": [
-  "http://172.28.4.81:34567/i-liukejun/models/vop294/releases/v2"
+  "http://172.28.4.81:34567/i-liukejun/models/vop294/releases/v3"
  ],
  "families": {
   "jp61": {
    "files": {
     "vocab.json": {
-     "size": 7628,
-     "sha256": "67dab0fcf201a1d6ca855dec9178d98e8057b3c1652bff2c87f36b17051cc697"
+     "size": 7481,
+     "sha256": "b1cfac50af0b1a15c28c94b9820805b40e67a6172696fd3915addc888d22b001"
     },
     "vop294.engine": {
-     "size": 22876484,
-     "sha256": "ff6b6c32d954edfda07b7239034c3eef9f97b221fdbfc8ee39d2dbb9766de4db"
+     "size": 22765708,
+     "sha256": "47b15102c4f3f9015497f185e29bef6bb60da028fc68100babbc22f2c718a9a6"
     }
    }
   }
