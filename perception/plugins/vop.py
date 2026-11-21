@@ -483,11 +483,10 @@ class _VOPNode(Node):
             return self._status()
 
     def _image_cb(self, msg: CompressedImage):
-        now = time.monotonic()
-        if now - self._last_inference_time < self._frame_interval:
-            return
-        self._last_inference_time = now
-        # Drop old frame if queue full (no backpressure)
+        # The fps cap is enforced by the worker (it waits out the interval), not
+        # here: dropping a frame that arrives early loses it for good when the
+        # sender publishes a single image and waits for the answer.
+        # Latest frame wins if the queue is full (no backpressure).
         try:
             self._frame_queue.put_nowait(msg.data)
         except queue.Full:
@@ -509,6 +508,15 @@ class _VOPNode(Node):
                 jpeg_bytes = self._frame_queue.get(timeout=1.0)
             except queue.Empty:
                 continue
+            wait = self._last_inference_time + self._frame_interval - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+                # A newer frame may have replaced this one meanwhile; use the latest.
+                try:
+                    jpeg_bytes = self._frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
+            self._last_inference_time = time.monotonic()
             started = time.time()
             try:
                 frame = cv2.imdecode(
