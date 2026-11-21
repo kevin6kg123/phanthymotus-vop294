@@ -61,6 +61,18 @@ _LOW_LAT_QOS = QoSProfile(
     durability=DurabilityPolicy.VOLATILE,
 )
 
+def _pil_decode(data: bytes):
+    """BGR frame via PIL for what cv2.imdecode refuses (GIF, CMYK/odd JPEG); None if PIL can't either."""
+    try:
+        import io
+        from PIL import Image
+        img = Image.open(io.BytesIO(bytes(data)))
+        img.seek(0)
+        return np.ascontiguousarray(np.asarray(img.convert("RGB"))[:, :, ::-1])
+    except Exception:
+        return None
+
+
 _PUB_QOS = QoSProfile(
     reliability=ReliabilityPolicy.BEST_EFFORT,
     history=HistoryPolicy.KEEP_LAST,
@@ -503,6 +515,11 @@ class _VOPNode(Node):
                     np.frombuffer(jpeg_bytes, np.uint8), cv2.IMREAD_COLOR
                 )
                 if frame is None:
+                    frame = _pil_decode(jpeg_bytes)
+                if frame is None:
+                    # Answer anyway: a silent drop leaves the caller waiting for its timeout.
+                    log.warning(f"[vop] undecodable frame ({len(jpeg_bytes)} bytes), publishing empty result")
+                    self._publish_objects([], started)
                     continue
                 outputs, meta = self._model.infer(frame)
                 if self._board is not None:
