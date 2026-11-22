@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <!--
-  Fast-DDS participant profile for the perception bundle (loaded by main.py when the
+  Fast-DDS participant profile for the perception bundle (loaded by main.py (plugins/ is copied into the image) when the
   environment does not already point FASTRTPS_DEFAULT_PROFILES_FILE elsewhere).
 
   Why: with the default builtin transports a same-host publisher hands samples over the
