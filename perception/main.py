@@ -737,7 +737,8 @@ def main():
     os.environ.setdefault("ROS_LOG_LEVEL", "WARN")
     # UDP-only Fast-DDS participant: large BEST_EFFORT images are lost over the default
     # 512 KB shared-memory transport (see fastdds_profile.xml). An explicit profile wins.
-    _dds_profile = Path(__file__).parent / "fastdds_profile.xml"
+    # Lives in plugins/: Dockerfile.jetson only copies main.py, plugins/, utils/, config.yaml.
+    _dds_profile = Path(__file__).parent / "plugins" / "fastdds_profile.xml"
     if _dds_profile.is_file() and os.environ.get("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp") == "rmw_fastrtps_cpp":
         os.environ.setdefault("FASTRTPS_DEFAULT_PROFILES_FILE", str(_dds_profile))
         log.info(f"[dds] Fast-DDS profile: {os.environ['FASTRTPS_DEFAULT_PROFILES_FILE']}")
